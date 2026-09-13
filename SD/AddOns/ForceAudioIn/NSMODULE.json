@@ -11,6 +11,8 @@
     { "NAME": "gain (0-1)", "VALUE": "0.2" },
     { "NAME": "channels (1|2)", "VALUE": "1" },
     { "NAME": "slot flag", "VALUE": "--slot" },
-    { "NAME": "voice slot (0-3)", "VALUE": "0" }
+    { "NAME": "voice slot (0-3)", "VALUE": "1" },
+    { "NAME": "channel flag", "VALUE": "--channel" },
+    { "NAME": "channel (L|R|LR)", "VALUE": "R" }
   ]
 }
