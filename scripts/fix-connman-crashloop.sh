@@ -46,16 +46,29 @@ else
     changed=1
 fi
 
-# 2. Restore systemd's crash-loop protection if something has disabled it
-#    (StartLimitBurst=0 / StartLimitIntervalSec=0 in a connman.service.d
-#    drop-in turns a single crash into permanent restart-flapping).
-if [ -f "$OVERRIDE_CONF" ] && grep -q 'StartLimitBurst[[:space:]]*=[[:space:]]*0\|StartLimitIntervalSec[[:space:]]*=[[:space:]]*0' "$OVERRIDE_CONF" 2>/dev/null; then
-    cp "$OVERRIDE_CONF" "$OVERRIDE_CONF.bak-$STAMP"
-    printf '[Service]\nRestart=always\nRestartSec=1\n' > "$OVERRIDE_CONF"
-    echo "override.conf: removed StartLimitBurst=0/StartLimitIntervalSec=0 (backup: $OVERRIDE_CONF.bak-$STAMP)"
-    changed=1
+# 2. Guarantee unlimited auto-restart. connman has at least one more
+#    SIGABRT trigger beyond the online check (a race in default-service
+#    selection when eth0/wlan0 both come up around the same time) that
+#    can't be patched here. Bounded restarts mean that crash can leave
+#    connman permanently "failed" until a human restarts the Force —
+#    worse than a brief flap. Always ensure the override reads exactly
+#    this, regardless of what's there now.
+WANT_OVERRIDE='[Unit]
+StartLimitIntervalSec=0
+
+[Service]
+Restart=always
+RestartSec=1
+StartLimitBurst=0
+'
+mkdir -p "$OVERRIDE_DIR"
+if [ -f "$OVERRIDE_CONF" ] && [ "$(cat "$OVERRIDE_CONF")" = "$(printf '%s' "$WANT_OVERRIDE")" ]; then
+    echo "override.conf: already set to unlimited restart, leaving as-is"
 else
-    echo "override.conf: no crash-loop-protection override found to fix, leaving as-is"
+    [ -f "$OVERRIDE_CONF" ] && cp "$OVERRIDE_CONF" "$OVERRIDE_CONF.bak-$STAMP"
+    printf '%s' "$WANT_OVERRIDE" > "$OVERRIDE_CONF"
+    echo "override.conf: set Restart=always/StartLimitBurst=0 (unlimited retries)$( [ -f "$OVERRIDE_CONF.bak-$STAMP" ] && echo ", backup: $OVERRIDE_CONF.bak-$STAMP")"
+    changed=1
 fi
 
 if [ "$changed" = "1" ]; then

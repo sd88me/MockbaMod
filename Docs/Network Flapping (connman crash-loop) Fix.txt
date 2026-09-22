@@ -63,34 +63,67 @@ override.conf. Either way, this is a real crash bug in connman itself
 override.conf just turns an isolated crash into permanent flapping
 instead of a clean, bounded failure.
 
+Update (2026-09-22 evening): a second, different connman crash
+------------------------------------------------------------------
+The online-check fix below stops *that* crash, but connman turns out to
+have at least one more SIGABRT trigger, unrelated to the online check.
+Caught live with the online check already disabled:
+
+    wlan0 {newlink} index 4 operstate 6 <UP>
+    Setting hostname to force
+    Online check disabled. Default service remains in READY state.
+    Aborting (signal 6) [/usr/sbin/connmand]
+
+This happens right as eth0 and wlan0 both reach "ready" around the same
+time — looks like a race in connman's default-service-selection logic
+when two technologies come up close together, not anything the online
+check controls. We don't have connman's source for this InMusic/Akai
+build, so it can't be patched directly.
+
+**This changes the right answer for the restart-limit question below.**
+A first pass at this fix restored systemd's default restart limit (5
+restarts / 10s) as "defense in depth." That was wrong for this daemon:
+since it has at least one more crash trigger we can't eliminate, hitting
+that limit means connman gives up permanently and *stays down* until a
+human notices and restarts the Force — which is worse than the flapping
+it was meant to prevent, and matches reports of needing "multiple
+restarts" to get network back. For a vendor daemon with sporadic
+unpatchable crashes, unlimited auto-restart (self-heals within a second
+or two, worst case a brief flap) beats a bounded retry that can end in
+permanent failure. Keep `StartLimitBurst=0`.
+
 Fix
 ---
-Two independent changes, both required for the full fix:
+Two independent changes, both required:
 
-1. **Stop the crash** — disable connman's online-connectivity check
-   entirely (`/etc/connman/main.conf`):
+1. **Stop the known crash** — disable connman's online-connectivity
+   check entirely (`/etc/connman/main.conf`):
 
        [General]
        OnlineCheckIPv4URL = http://ipv4.connman.inmusicbrands.com/
        EnableOnlineCheck = false
 
-   This is the actual root-cause fix. Once this is in place connman
-   never hits the code path that aborts, so it just stays up.
+   This eliminates the online-check abort specifically. It does not
+   eliminate the second (wlan0-race) crash above — nothing currently
+   does, short of an upstream connman fix.
 
-2. **Restore systemd's crash-loop protection** (defense in depth, in
-   case something else ever makes connman crash for an unrelated
-   reason) — rewrite `/etc/systemd/system/connman.service.d/override.conf`
-   to drop `StartLimitBurst=0` / `StartLimitIntervalSec=0`:
+2. **Guarantee unlimited auto-restart**, so whatever crashes connman
+   (known or not), it keeps retrying instead of ever going permanently
+   `failed` — (re)write `/etc/systemd/system/connman.service.d/override.conf`:
+
+       [Unit]
+       StartLimitIntervalSec=0
 
        [Service]
        Restart=always
        RestartSec=1
+       StartLimitBurst=0
 
-   Leaving `StartLimitBurst`/`StartLimitIntervalSec` unset restores
-   systemd's built-in default (5 restarts / 10s) — connman still
-   auto-recovers from a one-off crash quickly, but a persistent crash
-   now fails cleanly after a few seconds instead of flapping the
-   network forever.
+   `StartLimitBurst=0` disables systemd's crash-loop protection. That's
+   intentional here, not a bug to "fix" — see the update above. Yes,
+   this does mean a crash still visibly flaps the interface for ~1
+   second; it just guarantees that flap is temporary instead of a dead
+   network requiring a manual restart.
 
 Both files live on the device's real eMMC `/etc`, **not** on the
 MockbaMod SD card / OverlayFS, so this fix is not part of the addon
@@ -114,10 +147,16 @@ or copy it to the device and run it directly over SSH as root.
 Verifying it worked
 --------------------
     systemctl show connman.service -p MainPID,ActiveState,SubState,NRestarts
-    # ActiveState=active, SubState=running, NRestarts should stop climbing
+    # ActiveState=active, SubState=running.
+    # NRestarts may occasionally tick up (the wlan0-race crash above can
+    # still happen) — that's expected and fine as long as ActiveState
+    # stays "active" a few seconds later. What matters is it never sits
+    # in "activating (auto-restart)" for more than ~1-2 restarts in a row,
+    # and never goes to "failed".
 
     dmesg | grep -c 'eth0: Link is Down'
-    # run twice a minute apart — count should not be growing
+    # a rare single flap (one crash, self-healed) is normal now; dozens
+    # in a short window is not — that'd mean a new persistent trigger.
 
     ping -c 10 <force-ip>
     # 0% packet loss, stable low-ms latency
