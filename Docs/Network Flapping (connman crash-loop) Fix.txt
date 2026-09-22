@@ -1,0 +1,123 @@
+Network Flapping / "No Network" Fix (connman crash-loop)
+===========================================================
+
+Symptom
+-------
+- WiFi and/or Ethernet is flaky or drops out entirely while booted with
+  the MockbaMod SD card.
+- The WiFi and Ethernet settings menus on the Force's own screen misbehave
+  (grey out, don't update, look stuck).
+- Consistently fine when booted into stock Akai OS (no SD card).
+- `dmesg` shows eth0 (or the wlan interface) repeatedly cycling
+  Link Up / Link Down, sometimes dozens of times in a few minutes:
+
+    rk_gmac-dwmac ff290000.ethernet eth0: Link is Up - 1Gbps/Full ...
+    rk_gmac-dwmac ff290000.ethernet eth0: Link is Down
+    rk_gmac-dwmac ff290000.ethernet eth0: PHY [stmmac-0:01] driver [RTL8211E Gigabit Ethernet] (irq=68)
+    ... repeats continuously ...
+
+Root cause
+----------
+`systemctl status connman.service` shows it stuck in a crash-restart
+loop ("activating (auto-restart)", restart counter climbing every
+~1 second). `journalctl -u connman.service` shows the actual crash:
+
+    Setting hostname to force
+    eth0 {add} address 192.168.1.x/24 label eth0 family 2
+    Failed to find URL:http://ipv4.connman.inmusicbrands.com/
+    Aborting (signal 6) [/usr/sbin/connmand]
+
+This InMusic/Akai build of `connmand` performs an online-connectivity
+check against a vendor URL (`OnlineCheckIPv4URL` in
+`/etc/connman/main.conf`) and **aborts the whole daemon (SIGABRT) if
+that check fails or is slow**, instead of just logging it and retrying.
+DNS resolution and basic routing are not the problem — the check itself
+(an HTTP fetch to that URL) is what's failing/timing out.
+
+Normally a single connman crash wouldn't be a big deal — systemd's
+default restart-limit (5 restarts / 10s) would let it fail a handful of
+times and then settle into a stopped "failed" state. But this device has
+a pre-existing (not MockbaMod-authored — not present anywhere in this
+repo, confirmed by grep) drop-in at
+`/etc/systemd/system/connman.service.d/override.conf`:
+
+    [Unit]
+    StartLimitIntervalSec=0
+
+    [Service]
+    Restart=always
+    RestartSec=1
+    StartLimitBurst=0
+
+`StartLimitBurst=0` disables systemd's crash-loop protection entirely.
+Combined with the online-check crash, connman restarts every ~1 second,
+forever — and every restart brings the managed interface(s) down and
+back up, which is the flapping you see in `dmesg` and the misbehaving
+network menus (both WiFi and Ethernet settings UI are driven by connman
+over D-Bus, so a connman that never stays up for more than a second
+breaks both, not just WiFi).
+
+Why it's fine on stock OS: unclear whether stock ships the same
+override.conf. Either way, this is a real crash bug in connman itself
+(failing a reachability check should never abort the process) — the
+override.conf just turns an isolated crash into permanent flapping
+instead of a clean, bounded failure.
+
+Fix
+---
+Two independent changes, both required for the full fix:
+
+1. **Stop the crash** — disable connman's online-connectivity check
+   entirely (`/etc/connman/main.conf`):
+
+       [General]
+       OnlineCheckIPv4URL = http://ipv4.connman.inmusicbrands.com/
+       EnableOnlineCheck = false
+
+   This is the actual root-cause fix. Once this is in place connman
+   never hits the code path that aborts, so it just stays up.
+
+2. **Restore systemd's crash-loop protection** (defense in depth, in
+   case something else ever makes connman crash for an unrelated
+   reason) — rewrite `/etc/systemd/system/connman.service.d/override.conf`
+   to drop `StartLimitBurst=0` / `StartLimitIntervalSec=0`:
+
+       [Service]
+       Restart=always
+       RestartSec=1
+
+   Leaving `StartLimitBurst`/`StartLimitIntervalSec` unset restores
+   systemd's built-in default (5 restarts / 10s) — connman still
+   auto-recovers from a one-off crash quickly, but a persistent crash
+   now fails cleanly after a few seconds instead of flapping the
+   network forever.
+
+Both files live on the device's real eMMC `/etc`, **not** on the
+MockbaMod SD card / OverlayFS, so this fix is not part of the addon
+tree and isn't something `manage.sh ENABLE/DISABLE` touches. Confirmed
+2026-09-22 that it survives a `emmcRepair` addon run (`main.conf` and
+the rewritten `override.conf` were both untouched by the repair). It
+will NOT survive a full Akai firmware reflash — reapply after any
+firmware update if the flakiness comes back.
+
+Applying it
+-----------
+Run `scripts/fix-connman-crashloop.sh` (in this repo) against the
+Force over SSH — see `Docs/SSH-SFTP Instructions.txt` for connecting.
+It's idempotent: safe to run again after a firmware update or if you're
+just not sure whether the fix is already in place.
+
+    python3 tmp_ssh.py <force-ip> "$(cat scripts/fix-connman-crashloop.sh)"
+
+or copy it to the device and run it directly over SSH as root.
+
+Verifying it worked
+--------------------
+    systemctl show connman.service -p MainPID,ActiveState,SubState,NRestarts
+    # ActiveState=active, SubState=running, NRestarts should stop climbing
+
+    dmesg | grep -c 'eth0: Link is Down'
+    # run twice a minute apart — count should not be growing
+
+    ping -c 10 <force-ip>
+    # 0% packet loss, stable low-ms latency
