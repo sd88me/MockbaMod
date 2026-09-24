@@ -1,0 +1,21 @@
+{
+  "NAME": "DrmVncServer",
+  "DESCRIPTION": "Mirrors the Force's native screen over VNC (port 5900). Start only after MPC has fully booted and claimed the display - starting it too early (e.g. via Autolaunch) can crash-loop MPC. Prefer this Start/Stop toggle over Autolaunch. Device paths below (-f/-t/-k) are fixed at the values probed on this Force on 2026-09-25; if you ever reconnect the touchscreen/keyboard differently or they enumerate as different /dev/input/eventN nodes after a firmware update, edit this file's ARGUMENTS or just run 'vncdrm START' over SSH instead, which detects them fresh every time.",
+  "PROCESSNAME": "drmvncserver",
+  "DIRNAME": "DrmVncServer",
+  "FILENAME": "drmvncserver",
+  "BACKGROUND": true,
+  "AUTOLAUNCHABLE": false,
+  "ARGUMENTS": [
+    { "NAME": "display device flag", "VALUE": "-f" },
+    { "NAME": "display device path", "VALUE": "/dev/dri/card0" },
+    { "NAME": "touchscreen flag", "VALUE": "-t" },
+    { "NAME": "touchscreen device path", "VALUE": "/dev/input/event0" },
+    { "NAME": "keyboard flag", "VALUE": "-k" },
+    { "NAME": "keyboard device path", "VALUE": "/dev/input/event3" },
+    { "NAME": "rotation flag", "VALUE": "-r" },
+    { "NAME": "rotation degrees", "VALUE": "90" },
+    { "NAME": "framerate flag", "VALUE": "-F" },
+    { "NAME": "framerate value", "VALUE": "0" }
+  ]
+}
