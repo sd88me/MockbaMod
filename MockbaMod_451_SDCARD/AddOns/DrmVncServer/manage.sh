@@ -64,6 +64,17 @@ if [ "$mode" == "ENABLE" ]; then
 
     ln -sf "$installroot/drmvncserver" "/usr/bin/drmvncserver" 2>/dev/null
 
+    # Symlink the bundled shared libs into /usr/lib so drmvncserver resolves
+    # them via the default linker search path, not just LD_LIBRARY_PATH.
+    # Needed because nodeServer's Modules page spawns the binary directly
+    # (no env, no wrapper script) - without this it dies instantly with a
+    # "cannot open shared object file" error and the page's toggle silently
+    # does nothing.
+    for lib in "$installroot"*.so*; do
+        [ -f "$lib" ] && ln -sf "$lib" "/usr/lib/$(basename "$lib")" 2>/dev/null
+    done
+    ldconfig 2>/dev/null
+
     # Manual start only: run directly from installroot, never install a
     # top-level AddOns/run_$appname.sh, so nothing auto-starts on boot.
     rm -f "$runScript"
@@ -87,14 +98,12 @@ if [ "$mode" == "UNINSTALL" ]; then
         #rm "/usr/bin/$appname" 2>/dev/null
         #rm "$bint" 2>/dev/null 3>/dev/null
 
-        echo "uninstall not needed for this version."
-        exit 0
-
         libs=$(find "$installroot" -type f -maxdepth 1 -name "*.so*")
         for lib in $libs; do
             liblink=/usr/lib/$(basename "$lib")
             rm "$liblink" 2>/dev/null
         done
+        ldconfig 2>/dev/null
 
         # rm "/usr/bin/$appname" 2>/dev/null
         # rm "$bint" 2>/dev/null
