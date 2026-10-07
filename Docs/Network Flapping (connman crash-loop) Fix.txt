@@ -160,3 +160,43 @@ Verifying it worked
 
     ping -c 10 <force-ip>
     # 0% packet loss, stable low-ms latency
+
+Update (2026-10-08): WiFi dies for good after a crash — LoadPin + /usr overlay
+-------------------------------------------------------------------------------
+This one IS MockbaMod-specific. The kernel enforces LoadPin: firmware and
+kernel modules may only be loaded from the pinned read-only root fs
+(mmcblk0p6). MockbaMod's overlay.sh mounts an OverlayFS over /usr, so
+after boot /usr/lib/firmware lives on the overlay, not the root fs.
+
+The WiFi chip (BCM4339 over SDIO) loads its firmware once at ~4s, before
+the overlay exists, so it works at first. But during the boot-time
+connman crash-restart churn the chip hung ("brcmf_fil_cmd_data: bus is
+down"), the SDIO card was removed/re-probed, and the firmware reload was
+refused:
+
+    LoadPin: firmware denied obj="/usr/lib/firmware/cypress/cyfmac4339-sdio.bin"
+    brcmfmac mmc2:0001:1: Direct firmware load for brcm/brcmfmac4339-sdio.bin failed with error -1
+
+wlan0 then simply doesn't exist until a reboot. Without the card there's
+no overlay, so the same chip reset recovers on its own.
+
+Fix (in MockbaMod/overlay.sh): bind-mount the stock root's usr/lib/firmware
+and usr/lib/modules back over the overlay (via a bind of / at
+/run/stockroot), so those reads come from the pinned root fs again.
+Verified live: after the bind, re-binding the SDIO device to brcmfmac
+loaded firmware and brought wlan0 back without a reboot.
+
+Manual recovery without rebooting (if WiFi has vanished):
+    mkdir -p /run/stockroot; mount --bind / /run/stockroot
+    mount --bind /run/stockroot/usr/lib/firmware /usr/lib/firmware
+    for n in 1 2 3; do echo mmc2:0001:$n > /sys/bus/sdio/drivers/brcmfmac/bind; done
+
+Still open: connman itself still aborts ~5 times during boot and once
+right after systemd-timesyncd steps the clock forward (the RTC has no
+valid time, so every boot starts hours behind; ~18s after the NTP step
+connman drops its DHCP address and aborts). The first boot-time abort
+happens before MockbaMod's boot scripts run. connman's stderr is sent to
+/dev/null by its unit, so the abort reason was never visible; a drop-in
+/etc/systemd/system/connman.service.d/zz-capture-stderr.conf now sets
+StandardError=journal. After the next crash:
+    journalctl -u connman.service -b | grep -B5 Aborting
