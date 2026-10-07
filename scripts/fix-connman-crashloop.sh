@@ -71,6 +71,34 @@ else
     changed=1
 fi
 
+# 3. Force proxy method "direct" on every saved service. The actual abort
+#    (caught 2026-10-08 with stderr captured): with Proxy.Method=auto this
+#    connmand reports a garbage Proxy URL (dangling pointer - seen as "|LP",
+#    "uN"); whenever those bytes aren't valid UTF-8, libdbus asserts in
+#    dbus_message_iter_append_basic() and aborts the whole daemon. "direct"
+#    has no URL field, so the bad string is never marshalled.
+#    Service settings files can only be edited safely with connman stopped.
+need_proxy=0
+for f in /var/lib/connman/*/settings; do
+    [ -f "$f" ] || continue
+    grep -q '^Proxy.Method=direct$' "$f" || need_proxy=1
+done
+if [ "$need_proxy" = "1" ]; then
+    systemctl stop connman.service
+    for f in /var/lib/connman/*/settings; do
+        [ -f "$f" ] || continue
+        grep -q '^Proxy.Method=direct$' "$f" && continue
+        cp "$f" "$f.bak-$STAMP"
+        sed -i '/^Proxy\./d' "$f"
+        # Insert right after the [service] group header (first line).
+        sed -i '1a Proxy.Method=direct' "$f"
+        echo "$(basename "$(dirname "$f")"): Proxy.Method=direct"
+    done
+    changed=1
+else
+    echo "proxy: all saved services already Proxy.Method=direct"
+fi
+
 if [ "$changed" = "1" ]; then
     systemctl daemon-reload
     systemctl restart connman.service

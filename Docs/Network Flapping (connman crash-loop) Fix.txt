@@ -200,3 +200,35 @@ happens before MockbaMod's boot scripts run. connman's stderr is sent to
 /etc/systemd/system/connman.service.d/zz-capture-stderr.conf now sets
 StandardError=journal. After the next crash:
     journalctl -u connman.service -b | grep -B5 Aborting
+
+Update (2026-10-08, later): ROOT CAUSE of the connman aborts found & fixed
+--------------------------------------------------------------------------
+With stderr captured (zz-capture-stderr.conf), every abort showed:
+
+    dbus[484]: arguments to dbus_message_iter_append_basic() were incorrect,
+      assertion "_dbus_check_is_valid_utf8 (*string_p)" failed in file
+      .../dbus/1.14.10/dbus/dbus-message.c line 2775.
+    Aborting (signal 6) [/usr/sbin/connmand]
+
+`net.connman.Manager.GetServices` showed the bad string: with
+Proxy.Method=auto, each service's Proxy URL was garbage ("|LP" on
+ethernet, "uN" on wifi) - a dangling/uninitialised pointer in this
+connmand build. Whenever those bytes aren't valid UTF-8, the D-Bus
+PropertyChanged/ServicesChanged emission (fired on every state change -
+link up, DHCP bound, default service READY, clock step) hits libdbus's
+assertion and the whole daemon aborts. Contents of freed memory vary per
+boot/heap layout, hence "sometimes works after a restart". This is the
+same crash previously blamed on an eth0/wlan0 race and the online check.
+
+Fix: set Proxy.Method=direct on every saved service (no URL field is
+then marshalled). Live: 
+    busctl call net.connman /net/connman/service/<id> net.connman.Service \
+        SetProperty sv Proxy.Configuration "a{sv}" 1 Method s direct
+Persistently: scripts/fix-connman-crashloop.sh step 3 now rewrites every
+/var/lib/connman/*/settings with Proxy.Method=direct (connman stopped).
+NOTE: a NEW WiFi network joined later gets a fresh service defaulting to
+auto - re-run the script after joining a new network.
+
+Verified: reboot after the fix -> NRestarts=0, zero aborts, zero eth0
+link-downs, no WiFi chip reset, eth0 + wlan0 both got DHCP addresses.
+(Before: 5-6 aborts per boot, WiFi chip crash, eth0 flapping.)
