@@ -70,10 +70,15 @@ if [ "$mode" == "ENABLE" ]; then
     # (no env, no wrapper script) - without this it dies instantly with a
     # "cannot open shared object file" error and the page's toggle silently
     # does nothing.
+    # Only fill in libs the system lacks - never replace an existing one
+    # (connmand etc. load the stock gnutls/nettle/gmp/... from /usr/lib), and
+    # no ldconfig: it writes a persistent /etc/ld.so.cache that outlives the
+    # card. The default /usr/lib search finds these links without a cache.
     for lib in "$installroot"*.so*; do
-        [ -f "$lib" ] && ln -sf "$lib" "/usr/lib/$(basename "$lib")" 2>/dev/null
+        name=$(basename "$lib")
+        [ -f "$lib" ] && [ ! -e "/usr/lib/$name" ] && [ ! -L "/usr/lib/$name" ] &&
+            ln -s "$lib" "/usr/lib/$name" 2>/dev/null
     done
-    ldconfig 2>/dev/null
 
     # Manual start only: run directly from installroot, never install a
     # top-level AddOns/run_$appname.sh, so nothing auto-starts on boot.
@@ -98,12 +103,14 @@ if [ "$mode" == "UNINSTALL" ]; then
         #rm "/usr/bin/$appname" 2>/dev/null
         #rm "$bint" 2>/dev/null 3>/dev/null
 
-        libs=$(find "$installroot" -type f -maxdepth 1 -name "*.so*")
-        for lib in $libs; do
-            liblink=/usr/lib/$(basename "$lib")
-            rm "$liblink" 2>/dev/null
+        # Only remove links that point back into this addon - a bare rm of
+        # every bundled name would whiteout stock libs like libgnutls.so.30.
+        for liblink in /usr/lib/*.so*; do
+            [ -L "$liblink" ] || continue
+            case "$(readlink "$liblink")" in
+            "$installroot"* | "$mmPath/AddOns/$appDir"/*) rm -f "$liblink" ;;
+            esac
         done
-        ldconfig 2>/dev/null
 
         # rm "/usr/bin/$appname" 2>/dev/null
         # rm "$bint" 2>/dev/null
